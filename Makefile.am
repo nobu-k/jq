@@ -52,9 +52,9 @@ version.h: .remake-version-h
 	$(AM_V_GEN) $(generate_ver); echo "$$ver" > $@
 
 bin_PROGRAMS = jq
-jq_SOURCES = main.c
+jq_SOURCES = main.c jv_msgpack.c
 jq_LDFLAGS = -static-libtool-libs
-jq_LDADD = libjq.la -lm
+jq_LDADD = libjq.la -lm -lmsgpack
 
 ### Tests (make check)
 

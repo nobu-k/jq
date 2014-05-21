@@ -4,6 +4,7 @@
 #include <string.h>
 #include <ctype.h>
 #include <unistd.h>
+#include <msgpack.h>
 #include "compile.h"
 #include "jv.h"
 #include "jq.h"
@@ -11,6 +12,7 @@
 #include "version.h"
 
 int jq_testsuite(int argc, char* argv[]);
+jv msgpack_to_jv(msgpack_object obj);
 
 static const char* progname;
 
@@ -60,6 +62,7 @@ enum {
   FROM_FILE = 512,
 
   EXIT_STATUS = 8192,
+  MSGPACK_INPUT = 16384,
 
   /* debugging only */
   DUMP_DISASM = 2048,
@@ -131,6 +134,31 @@ static int read_more(char* buf, size_t size) {
   return 1;
 }
 
+static ssize_t read_more_binary(char* buf, size_t size) {
+  while (!current_input || feof(current_input)) {
+    if (current_input) {
+      fclose(current_input);
+      current_input = 0;
+    }
+    if (next_input_idx == ninput_files) {
+      return -1;
+    }
+    if (!strcmp(input_filenames[next_input_idx], "-")) {
+      if (freopen(NULL, "rb", stdin)) {
+        current_input = stdin;
+      }
+    } else {
+      current_input = fopen(input_filenames[next_input_idx], "rb");
+    }
+    if (!current_input) {
+      fprintf(stderr, "%s: %s: %s\n", progname, input_filenames[next_input_idx], strerror(errno));
+    }
+    next_input_idx++;
+  }
+
+  return fread(buf, 1, size, current_input);
+}
+
 int main(int argc, char* argv[]) {
   jq_state *jq = NULL;
   int ret = 0;
@@ -192,6 +220,8 @@ int main(int argc, char* argv[]) {
       options |= FROM_FILE;
     } else if (isoption(argv[i], 'e', "exit-status")) {
       options |= EXIT_STATUS;
+    } else if (isoption(argv[i], 'm', "msgpack-input")) {
+      options |= MSGPACK_INPUT;
     } else if (isoption(argv[i], 'I', "online-input")) {
       parser_flags = JV_PARSE_EXPLODE_TOPLEVEL_ARRAY;
     } else if (isoption(argv[i], 0, "arg")) {
@@ -241,7 +271,15 @@ int main(int argc, char* argv[]) {
     }
   }
   if (!program) usage();
-  if (ninput_files == 0) current_input = stdin;
+  if (ninput_files == 0) {
+    if (options & MSGPACK_INPUT) {
+      if (!freopen(NULL, "rb", stdin)) {
+        fprintf(stderr, "%s: cannot reopen stdin with a binary mode flag\n", progname);
+        die();
+      }
+    }
+    current_input = stdin;
+  }
 
   if ((options & PROVIDE_NULL) && (options & (RAW_INPUT | SLURP))) {
     fprintf(stderr, "%s: --null-input cannot be used with --raw-input or --slurp\n", progname);
@@ -274,7 +312,7 @@ int main(int argc, char* argv[]) {
 
   if (options & PROVIDE_NULL) {
     ret = process(jq, jv_null(), jq_flags);
-  } else {
+  } else  if (!(options & MSGPACK_INPUT)) {
     jv slurped;
     if (options & SLURP) {
       if (options & RAW_INPUT) {
@@ -323,6 +361,44 @@ int main(int argc, char* argv[]) {
     if (options & SLURP) {
       ret = process(jq, slurped, jq_flags);
     }
+  } else {
+    // TODO: support slurp
+    const size_t bufsize = 4096;
+    msgpack_unpacker unpacker;
+    if (!msgpack_unpacker_init(&unpacker, bufsize)) {
+      fprintf(stderr, "%s: cannot initialize msgpack unpacker", progname);
+      goto out;
+    }
+
+    while (true) {
+      ssize_t num_read;
+
+      if (!msgpack_unpacker_reserve_buffer(&unpacker, bufsize)) {
+        fprintf(stderr, "%s: cannot allocate buffer", progname);
+        goto msgpack_out;
+      }
+
+      num_read = read_more_binary(msgpack_unpacker_buffer(&unpacker), msgpack_unpacker_buffer_capacity(&unpacker));
+      if (num_read < 0) {
+        break;
+      }
+      msgpack_unpacker_buffer_consumed(&unpacker, num_read);
+
+      ret = msgpack_unpacker_execute(&unpacker);
+      if (ret < 0) {
+        fprintf(stderr, "%s: msgpack parse error", progname);
+        ret = 4;
+        break;
+      } else if (ret != 0) {
+        msgpack_zone* zone = msgpack_unpacker_release_zone(&unpacker);
+        jv value = msgpack_to_jv(msgpack_unpacker_data(&unpacker));
+        msgpack_zone_free(zone);
+        ret = process(jq, value, jq_flags);
+      }
+    }
+  msgpack_out:
+    msgpack_unpacker_destroy(&unpacker);
+    goto out;
   }
 out:
   jv_mem_free(input_filenames);
