@@ -384,16 +384,21 @@ int main(int argc, char* argv[]) {
       }
       msgpack_unpacker_buffer_consumed(&unpacker, num_read);
 
-      ret = msgpack_unpacker_execute(&unpacker);
-      if (ret < 0) {
-        fprintf(stderr, "%s: msgpack parse error", progname);
-        ret = 4;
-        break;
-      } else if (ret != 0) {
-        msgpack_zone* zone = msgpack_unpacker_release_zone(&unpacker);
-        jv value = msgpack_to_jv(msgpack_unpacker_data(&unpacker));
-        msgpack_zone_free(zone);
-        ret = process(jq, value, jq_flags);
+      while (true) {
+        ret = msgpack_unpacker_execute(&unpacker);
+        if (ret < 0) {
+          fprintf(stderr, "%s: msgpack parse error", progname);
+          ret = 4;
+          goto msgpack_out;
+        } else if (ret == 0) {
+          break;
+
+        } else {
+          msgpack_zone* zone = msgpack_unpacker_release_zone(&unpacker);
+          jv value = msgpack_to_jv(msgpack_unpacker_data(&unpacker));
+          msgpack_zone_free(zone);
+          ret = process(jq, value, jq_flags);
+        }
       }
     }
   msgpack_out:
